@@ -1,5 +1,5 @@
 ## setup env variables
-$env:BB_URL = "https://bitbucket.yourcompany.com"
+$env:BB_URL = "BB_URL"
 $env:BB_PAT = "your_secret_token_here"
 
 ## execute scripts
