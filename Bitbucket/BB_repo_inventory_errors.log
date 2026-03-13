@@ -1,2 +1,0 @@
-ERROR: Response status code does not indicate success: 404 (). at http://20.84.89.88:7990/rest/api/1.0/projects/BBSMIG/repos/lab8/commits?limit=1
-ERROR: Response status code does not indicate success: 404 (). at http://20.84.89.88:7990/rest/api/1.0/projects/BBSMIG/repos/voting_app/commits?limit=1
