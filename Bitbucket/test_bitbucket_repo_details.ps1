@@ -85,10 +85,13 @@ foreach ($proj in $allProjects) {
         
         foreach ($repo in $repoResponse.values) {
             $sizeMB = if ($repo.size) { [math]::Round($repo.size / 1MB, 2) } else { "0" }
+            
+            # ── ADJUSTED OUTPUT FORMAT ─────────────────────────────────────────
             $row = [PSCustomObject]@{
-                "Project"        = $proj.name
-                "Repository"     = $repo.name
-                "RepoUrl"        = ($repo.links.clone | Where-Object { $_.name -eq 'https' -or $_.name -eq 'http' } | Select-Object -First 1).href
+                "project-key"    = $proj.key
+                "project-name"   = $proj.name
+                "repo"           = $repo.name
+                "url"            = ($repo.links.clone | Where-Object { $_.name -eq 'https' -or $_.name -eq 'http' } | Select-Object -First 1).href
                 "MetadataSizeMB" = "$sizeMB"
                 "IsDisabled"     = if ($repo.status -eq 'ARCHIVED') { "True" } else { "False" }
             }

@@ -2,35 +2,32 @@ param (
     [string]$BaseUrl           = "",
     [string]$Pat               = "",
     [string]$OutputCsv         = "BB_repo_inventory_updated.csv",
+    [string]$SummaryCsv        = "BB_project_repo_counts.csv",
     [string]$ErrorLog          = "BB_repo_inventory_errors.log",
     [int]$DelayMs              = 250,
     [int]$MaxRetries           = 6,
-    [int]$ParallelThreshold    = 50,
     [int]$ThrottleLimit        = 4
 )
+
+# --- Validation Block ---
+if ([string]::IsNullOrWhiteSpace($BaseUrl)) {
+    Write-Host "ERROR: BaseUrl is missing." -ForegroundColor Red
+    exit
+}
+if ([string]::IsNullOrWhiteSpace($Pat)) {
+    Write-Host "ERROR: PAT token is missing." -ForegroundColor Red
+    exit
+}
 
 $headers = @{ Authorization = "Bearer $Pat"; "Content-Type" = "application/json" }
 
 # Cleanup
-foreach ($file in $OutputCsv, $ErrorLog) { if (Test-Path $file) { Remove-Item $file -Force } }
+foreach ($file in $OutputCsv, $SummaryCsv, $ErrorLog) { if (Test-Path $file) { Remove-Item $file -Force } }
 
 $script:csvInitialized = $false
 $totalRepos = 0
 $totalSkipped = 0
-$activeThresholdDays = 180
-$staleThresholdDays  = 365
-
-# --- Activity Logic ---
-function Get-ActivityStatus {
-    param ([string]$LastCommitDate)
-    if ($LastCommitDate -eq "Never") { return "Never Used" }
-    try {
-        $daysSince = (New-TimeSpan -Start ([datetime]$LastCommitDate) -End (Get-Date)).Days
-        if ($daysSince -lt $activeThresholdDays) { return "Active" }
-        if ($daysSince -lt $staleThresholdDays)  { return "Stale" }
-        return "Inactive"
-    } catch { return "Unknown" }
-}
+$projectSummaryList = New-Object System.Collections.Generic.List[PSCustomObject]
 
 # --- API Wrapper ---
 function Invoke-BBSApi {
@@ -46,38 +43,13 @@ function Invoke-BBSApi {
                 $wait = [math]::Min(60, [math]::Pow(2, $retry + 1))
                 Start-Sleep -Seconds $wait
                 $retry++
-            } else { return $null }
+            } else { 
+                "ERROR: $($_.Exception.Message) at $Url" | Out-File -FilePath $ErrorLog -Append
+                return $null 
+            }
         }
     }
     return $null
-}
-
-# --- Parallel Logic ---
-function Get-LastCommitParallel {
-    param ([object[]]$Repos, [string]$BaseUrl, [string]$Pat, [int]$Threads)
-    $results = [hashtable]::Synchronized(@{})
-    $sb = {
-        param($repo, $baseUrl, $pat, $results)
-        $hdrs = @{ Authorization = "Bearer $pat" }
-        $url  = "$baseUrl/rest/api/1.0/projects/$($repo.project.key)/repos/$($repo.slug)/commits?limit=1"
-        try {
-            $res = Invoke-RestMethod -Uri $url -Headers $hdrs -Method Get
-            if ($res.values -and $res.values.Count -gt 0) {
-                $date = [datetimeoffset]::FromUnixTimeMilliseconds($res.values[0].authorTimestamp).DateTime
-                $results[$repo.id] = $date.ToString("yyyy-MM-dd HH:mm:ss")
-            } else { $results[$repo.id] = "Never" }
-        } catch { $results[$repo.id] = "Unknown" }
-    }
-    $pool = [RunspaceFactory]::CreateRunspacePool(1, $Threads)
-    $pool.Open()
-    $jobs = foreach ($repo in $Repos) {
-        $ps = [PowerShell]::Create().AddScript($sb).AddArgument($repo).AddArgument($BaseUrl).AddArgument($Pat).AddArgument($results)
-        $ps.RunspacePool = $pool
-        [PSCustomObject]@{ PS = $ps; Handle = $ps.BeginInvoke() }
-    }
-    foreach ($j in $jobs) { $j.PS.EndInvoke($j.Handle) | Out-Null; $j.PS.Dispose() }
-    $pool.Close(); $pool.Dispose()
-    return $results
 }
 
 # --- Step 1: Projects ---
@@ -92,7 +64,7 @@ while (-not $isLast) {
 }
 Write-Host "Total projects found: $($allProjects.Count)" -ForegroundColor Green
 
-# --- Step 2: Repos ---
+# --- Step 2: Repos & Metadata ---
 $currentProjIdx = 1
 foreach ($proj in $allProjects) {
     Write-Host "`n[$currentProjIdx/$($allProjects.Count)] $($proj.name)" -ForegroundColor Cyan
@@ -105,28 +77,51 @@ foreach ($proj in $allProjects) {
         $isLast = $res.isLastPage; $start = $res.nextPageStart
     }
 
-    if ($projectRepos.Count -gt 0) {
-        $commitData = Get-LastCommitParallel -Repos $projectRepos -BaseUrl $BaseUrl -Pat $Pat -Threads $ThrottleLimit
-        foreach ($repo in $projectRepos) {
-            $totalRepos++
-            $lastDate = if ($commitData.ContainsKey($repo.id)) { $commitData[$repo.id] } else { "Never" }
-            $row = [PSCustomObject]@{
-                "Project"        = $proj.name
-                "Repository"     = $repo.name
-                "RepoUrl"        = ($repo.links.clone | Where-Object { $_.name -eq 'https' } | Select-Object -First 1).href
-                "MetadataSizeMB" = "0"
-                "IsDisabled"     = if ($repo.status -eq 'ARCHIVED') { "True" } else { "False" }
-                "LastPushDate"   = $lastDate
-                "ActivityStatus" = Get-ActivityStatus -LastCommitDate $lastDate
-            }
-            if (-not $script:csvInitialized) {
-                $row | Export-Csv -Path $OutputCsv -NoTypeInformation -Encoding UTF8
-                $script:csvInitialized = $true
-            } else { $row | Export-Csv -Path $OutputCsv -NoTypeInformation -Encoding UTF8 -Append }
+    # Add to Summary List
+    $projectSummaryList.Add([PSCustomObject]@{
+        Project   = $proj.name
+        RepoCount = $projectRepos.Count
+    })
+
+    foreach ($repo in $projectRepos) {
+        $totalRepos++
+        
+        # 1. Fetch Last Commit Date
+        $commitRes = Invoke-BBSApi -Url "$BaseUrl/rest/api/1.0/projects/$($proj.key)/repos/$($repo.slug)/commits?limit=1"
+        $lastCommitDate = ""
+        if ($commitRes.values -and $commitRes.values.Count -gt 0) {
+            $lastCommitDate = [datetimeoffset]::FromUnixTimeMilliseconds($commitRes.values[0].authorTimestamp).DateTime.ToString("yyyy-MM-dd hh:mm tt")
+        }
+
+        # 2. Fetch PR Count (Total)
+        $prRes = Invoke-BBSApi -Url "$BaseUrl/rest/api/1.0/projects/$($proj.key)/repos/$($repo.slug)/pull-requests?state=ALL&limit=1"
+        $prCount = if ($prRes) { $prRes.size } else { 0 }
+
+        # Prepare Row in your specified format
+        $row = [PSCustomObject]@{
+            "project-key"               = $proj.key
+            "project-name"              = $proj.name
+            "repo"                      = $repo.name
+            "url"                       = ($repo.links.clone | Where-Object { $_.name -eq 'http' -or $_.name -eq 'https' } | Select-Object -First 1).href
+            "last-commit-date"          = $lastCommitDate
+            "repo-size-in-bytes"        = "0"
+            "attachments-size-in-bytes" = "0"
+            "is-archived"               = if ($repo.status -eq 'ARCHIVED') { "True" } else { "False" }
+            "pr-count"                  = $prCount
+        }
+
+        if (-not $script:csvInitialized) {
+            $row | Export-Csv -Path $OutputCsv -NoTypeInformation -Encoding UTF8
+            $script:csvInitialized = $true
+        } else {
+            $row | Export-Csv -Path $OutputCsv -NoTypeInformation -Encoding UTF8 -Append
         }
     }
     $currentProjIdx++
 }
+
+# Export Project Counts Summary
+$projectSummaryList | Export-Csv -Path $SummaryCsv -NoTypeInformation -Encoding UTF8
 
 # =============================================================================
 #  SUMMARY
@@ -136,6 +131,7 @@ Write-Host "Total Projects  : $($allProjects.Count)"
 Write-Host "Total Repos     : $totalRepos"
 Write-Host "Skipped Projects: $totalSkipped"
 Write-Host "Repo Inventory  : $OutputCsv"
+Write-Host "Project Counts  : $SummaryCsv"
 if ($totalSkipped -gt 0) {
     Write-Host "Error Log       : $ErrorLog  (review skipped items)" -ForegroundColor Yellow
 }
