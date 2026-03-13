@@ -27,8 +27,6 @@ function Invoke-BitbucketApi {
         }
         catch {
             $statusCode = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-            
-            # If 404, the repo is likely empty; return null instead of retrying
             if ($statusCode -eq 404) { return $null }
 
             $attempt++
@@ -49,39 +47,62 @@ Write-Host "`nFetching projects..." -ForegroundColor Cyan
 $allProjects = New-Object System.Collections.Generic.List[object]
 $isLastProjPage = $false; $projStart = 0
 while (-not $isLastProjPage) {
-    $response = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects?start=$projStart&limit=100"
+    $response = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects?start=$projStart&limit=2"
     if ($null -eq $response) { break }
     foreach ($p in $response.values) { $allProjects.Add($p) }
+    
+    # Console Output: Fetched X projects so far...
+    Write-Host "  Fetched $($allProjects.Count) projects so far..." -ForegroundColor Gray
+    
     $isLastProjPage = $response.isLastPage; $projStart = $response.nextPageStart
 }
+
+Write-Host "Total projects found: $($allProjects.Count)" -ForegroundColor Green
 
 # ── Step 2: Fetch Repos & Details ─────────────────────────────────────────────
 $currentProjIdx = 1
 foreach ($proj in $allProjects) {
-    Write-Host "[$currentProjIdx/$($allProjects.Count)] $($proj.name)" -ForegroundColor Cyan
+    Write-Host "`n[$currentProjIdx/$($allProjects.Count)] $($proj.name)" -ForegroundColor Cyan
     $isLastRepoPage = $false; $repoStart = 0
+    $repoPageIdx = 1
+    $runningTotalForProj = 0
+    $projectRepos = New-Object System.Collections.Generic.List[object]
     
     while (-not $isLastRepoPage) {
-        $repoResponse = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects/$($proj.key)/repos?start=$repoStart&limit=100"
+        $repoResponse = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects/$($proj.key)/repos?start=$repoStart&limit=2"
         if ($null -eq $repoResponse) { break }
         
-        foreach ($repo in $repoResponse.values) {
+        $reposOnPage = $repoResponse.values.Count
+        $runningTotalForProj += $reposOnPage
+        
+        # Console Output: Repo page X — Y repos (running total: Z)
+        Write-Host "  Repo page $repoPageIdx — $reposOnPage repos (running total: $runningTotalForProj)" -ForegroundColor Gray
+        
+        foreach ($r in $repoResponse.values) { $projectRepos.Add($r) }
+
+        $isLastRepoPage = $repoResponse.isLastPage
+        $repoStart = $repoResponse.nextPageStart
+        $repoPageIdx++
+    }
+
+    if ($projectRepos.Count -gt 0) {
+        # Console Output: Fetching push dates sequentially...
+        Write-Host "  Fetching push dates sequentially for $($projectRepos.Count) repos..." -ForegroundColor Gray
+        
+        foreach ($repo in $projectRepos) {
             $totalRepos++
 
-            # Fetch Last Commit Date (Handles 404 for empty repos)
-            $commitUrl = "$BaseUrl/rest/api/1.0/projects/$($proj.key)/repos/$($repo.slug)/commits?limit=1"
-            $commitRes = Invoke-BitbucketApi -Url $commitUrl
+            # Fetch Last Commit Date
+            $commitRes = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects/$($proj.key)/repos/$($repo.slug)/commits?limit=1"
             $lastDate = ""
             if ($commitRes.values -and $commitRes.values.Count -gt 0) {
                 $lastDate = [datetimeoffset]::FromUnixTimeMilliseconds($commitRes.values[0].authorTimestamp).DateTime.ToString("yyyy-MM-dd hh:mm tt")
             }
 
             # Fetch PR Count
-            $prUrl = "$BaseUrl/rest/api/1.0/projects/$($proj.key)/repos/$($repo.slug)/pull-requests?state=ALL&limit=1"
-            $prRes = Invoke-BitbucketApi -Url $prUrl
+            $prRes = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects/$($proj.key)/repos/$($repo.slug)/pull-requests?state=ALL&limit=1"
             $prCount = if ($prRes) { $prRes.size } else { 0 }
 
-            # Prepare Single Output Row
             $row = [PSCustomObject]@{
                 "project-key"               = $proj.key
                 "project-name"              = $proj.name
@@ -101,14 +122,16 @@ foreach ($proj in $allProjects) {
                 $row | Export-Csv -Path $OutputCsv -NoTypeInformation -Encoding UTF8 -Append
             }
         }
-        $isLastRepoPage = $repoResponse.isLastPage
-        $repoStart = $repoResponse.nextPageStart
     }
+    
+    # Console Output: Total repos: X
+    Write-Host "  Total repos: $($projectRepos.Count)" -ForegroundColor Gray
     $currentProjIdx++
 }
 
-# ── Final Summary (Console Only) ──────────────────────────────────────────────
+# ── Final Summary ─────────────────────────────────────────────────────────────
 Write-Host "`n===== INVENTORY COMPLETE =====" -ForegroundColor Green
-Write-Host "Total Projects : $($allProjects.Count)"
-Write-Host "Total Repos    : $totalRepos"
-Write-Host "Output File    : $OutputCsv"
+Write-Host "Total Projects  : $($allProjects.Count)"
+Write-Host "Total Repos     : $totalRepos"
+Write-Host "Skipped Projects: $totalSkipped"
+Write-Host "Repo Inventory  : $OutputCsv"

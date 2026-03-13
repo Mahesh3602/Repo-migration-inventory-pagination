@@ -48,7 +48,7 @@ Write-Host "`nFetching projects..." -ForegroundColor Cyan
 $allProjects = New-Object System.Collections.Generic.List[object]
 $isLastProjPage = $false; $projStart = 0
 while (-not $isLastProjPage) {
-    $response = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects?start=$projStart&limit=100"
+    $response = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects?start=$projStart&limit=2"
     if ($null -eq $response) { $totalSkipped++; break }
     foreach ($p in $response.values) { $allProjects.Add($p) }
     Write-Host "  Fetched $($allProjects.Count) projects so far..." -ForegroundColor Gray
@@ -69,7 +69,7 @@ foreach ($proj in $allProjects) {
     
     $isLastRepoPage = $false; $repoStart = 0
     while (-not $isLastRepoPage) {
-        $repoResponse = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects/$projKey/repos?start=$repoStart&limit=100"
+        $repoResponse = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects/$projKey/repos?start=$repoStart&limit=2"
         
         if ($null -eq $repoResponse) { 
             $totalSkipped++
