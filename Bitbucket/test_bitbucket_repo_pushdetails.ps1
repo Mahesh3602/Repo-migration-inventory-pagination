@@ -1,8 +1,8 @@
 param (
     [string]$BaseUrl           = "",
     [string]$Pat               = "",
-    [string]$OutputCsv         = "bb_repo_inventory_updated.csv",
-    [string]$ErrorLog          = "bb_repo_inventory_errors.log",
+    [string]$OutputCsv         = "BB_repo_inventory_updated.csv",
+    [string]$ErrorLog          = "BB_repo_inventory_errors.log",
     [int]$DelayMs              = 250,
     [int]$MaxRetries           = 6,
     [int]$ParallelThreshold    = 50,
