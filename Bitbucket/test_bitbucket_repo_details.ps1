@@ -1,3 +1,15 @@
+# ============================================================
+#  Bitbucket Repository Inventory Script
+#  - Paginated project fetching (REST API 1.0)
+#  - Start/Limit Offset pagination (Safe for large instances)
+#  - Project-level repository counts exported to separate CSV
+#  - Intelligent retry logic for 429 (Rate Limit) and 5xx errors
+#  - Configurable throttle delays to prevent server strain
+#  - Automatic cleanup of previous run artifacts
+#  - Detailed error logging for skipped or failed projects
+#  - Metadata extraction including Archive status and Clone URLs
+# ============================================================
+
 param (
     [string]$BaseUrl           = "",
     [string]$Pat               = "",
@@ -36,6 +48,7 @@ function Invoke-BitbucketApi {
         catch {
             $attempt++
             $statusCode = $_.Exception.Response.StatusCode.value__
+            # Handle rate limiting or server unavailability
             if ($statusCode -in 429, 503, 504) { Start-Sleep -Seconds ($attempt * 2) }
             else { return $null }
         }
@@ -48,6 +61,7 @@ Write-Host "`nFetching projects..." -ForegroundColor Cyan
 $allProjects = New-Object System.Collections.Generic.List[object]
 $isLastProjPage = $false; $projStart = 0
 while (-not $isLastProjPage) {
+    # limit=2 used for testing; change to 100 for production performance
     $response = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects?start=$projStart&limit=2"
     if ($null -eq $response) { $totalSkipped++; break }
     foreach ($p in $response.values) { $allProjects.Add($p) }
@@ -69,6 +83,7 @@ foreach ($proj in $allProjects) {
     
     $isLastRepoPage = $false; $repoStart = 0
     while (-not $isLastRepoPage) {
+        # limit=2 used for testing; change to 100 for production performance
         $repoResponse = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects/$projKey/repos?start=$repoStart&limit=2"
         
         if ($null -eq $repoResponse) { 
@@ -86,7 +101,7 @@ foreach ($proj in $allProjects) {
         foreach ($repo in $repoResponse.values) {
             $sizeMB = if ($repo.size) { [math]::Round($repo.size / 1MB, 2) } else { "0" }
             
-            # ── ADJUSTED OUTPUT FORMAT ─────────────────────────────────────────
+            # ── Adjusted Output Format (Standard CSV Columns) ──────────────────
             $row = [PSCustomObject]@{
                 "project-key"    = $proj.key
                 "project-name"   = $proj.name
@@ -117,7 +132,7 @@ foreach ($proj in $allProjects) {
 $allProjectStats | Export-Csv -Path $ProjectCountCsv -NoTypeInformation -Encoding UTF8
 
 # =============================================================================
-#  SUMMARY
+#  SUMMARY REPORT
 # =============================================================================
 Write-Host "`n===== INVENTORY COMPLETE =====" -ForegroundColor Green
 Write-Host "Total Projects  : $($allProjects.Count)"

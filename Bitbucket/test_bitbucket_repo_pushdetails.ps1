@@ -1,10 +1,24 @@
+# ============================================================
+#  Bitbucket Repository Inventory Script
+#  - Paginated project fetching (REST API 1.0)
+#  - Sequential repo fetching with 100-item page limits
+#  - Deep-dive activity analysis via Commits API
+#  - Custom Activity Thresholds (Active/Stale/Inactive/Empty)
+#  - Automated Unix-to-DateTime timestamp conversion
+#  - Graceful 404 handling for restricted/empty metadata
+#  - Intelligent API throttling and Max-Retry logic
+#  - Clean CSV appending (No redundant headers)
+# ============================================================
+
 param (
     [string]$BaseUrl           = "",
     [string]$Pat               = "",
     [string]$OutputCsv         = "BB_repo_inventory_updated.csv",
     [string]$ErrorLog          = "BB_repo_inventory_errors.log",
     [int]$DelayMs              = 250,
-    [int]$MaxRetries           = 6
+    [int]$MaxRetries           = 6,
+    [int]$activeThresholdDays  = 180,  # < 6 months
+    [int]$staleThresholdDays   = 365   # 6-12 months (Stale), > 12 months (Inactive)
 )
 
 $headers = @{ Authorization = "Bearer $Pat"; "Content-Type" = "application/json" }
@@ -16,7 +30,7 @@ $script:csvInitialized = $false
 $totalRepos = 0
 $totalSkipped = 0
 
-# ── API Wrapper (With 404 Graceful Handling) ──────────────────────────────────
+# ── API Wrapper ───────────────────────────────────────────────────────────────
 function Invoke-BitbucketApi {
     param ([string]$Url)
     $attempt = 0
@@ -27,6 +41,7 @@ function Invoke-BitbucketApi {
         }
         catch {
             $statusCode = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+            # Gracefully handle missing endpoints (like size/info)
             if ($statusCode -eq 404) { return $null }
 
             $attempt++
@@ -47,13 +62,11 @@ Write-Host "`nFetching projects..." -ForegroundColor Cyan
 $allProjects = New-Object System.Collections.Generic.List[object]
 $isLastProjPage = $false; $projStart = 0
 while (-not $isLastProjPage) {
-    $response = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects?start=$projStart&limit=2"
+    $response = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects?start=$projStart&limit=100"
     if ($null -eq $response) { break }
     foreach ($p in $response.values) { $allProjects.Add($p) }
     
-    # Console Output: Fetched X projects so far...
     Write-Host "  Fetched $($allProjects.Count) projects so far..." -ForegroundColor Gray
-    
     $isLastProjPage = $response.isLastPage; $projStart = $response.nextPageStart
 }
 
@@ -69,15 +82,13 @@ foreach ($proj in $allProjects) {
     $projectRepos = New-Object System.Collections.Generic.List[object]
     
     while (-not $isLastRepoPage) {
-        $repoResponse = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects/$($proj.key)/repos?start=$repoStart&limit=2"
+        $repoResponse = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects/$($proj.key)/repos?start=$repoStart&limit=100"
         if ($null -eq $repoResponse) { break }
         
         $reposOnPage = $repoResponse.values.Count
         $runningTotalForProj += $reposOnPage
         
-        # Console Output: Repo page X — Y repos (running total: Z)
         Write-Host "  Repo page $repoPageIdx — $reposOnPage repos (running total: $runningTotalForProj)" -ForegroundColor Gray
-        
         foreach ($r in $repoResponse.values) { $projectRepos.Add($r) }
 
         $isLastRepoPage = $repoResponse.isLastPage
@@ -86,33 +97,37 @@ foreach ($proj in $allProjects) {
     }
 
     if ($projectRepos.Count -gt 0) {
-        # Console Output: Fetching push dates sequentially...
-        Write-Host "  Fetching push dates sequentially for $($projectRepos.Count) repos..." -ForegroundColor Gray
+        Write-Host "  Fetching activity status sequentially for $($projectRepos.Count) repos..." -ForegroundColor Gray
         
         foreach ($repo in $projectRepos) {
             $totalRepos++
 
-            # Fetch Last Commit Date
+            # Fetch Last Commit Date & Activity Logic
             $commitRes = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects/$($proj.key)/repos/$($repo.slug)/commits?limit=1"
             $lastDate = ""
+            $activityStatus = "Empty"
+            
             if ($commitRes.values -and $commitRes.values.Count -gt 0) {
-                $lastDate = [datetimeoffset]::FromUnixTimeMilliseconds($commitRes.values[0].authorTimestamp).DateTime.ToString("yyyy-MM-dd hh:mm tt")
+                # Convert Unix Milliseconds to PowerShell DateTime
+                $rawDate = [datetimeoffset]::FromUnixTimeMilliseconds($commitRes.values[0].authorTimestamp).DateTime
+                $lastDate = $rawDate.ToString("yyyy-MM-dd hh:mm tt")
+                
+                # Activity categorization based on user thresholds
+                $daysSince = (New-TimeSpan -Start $rawDate -End (Get-Date)).TotalDays
+                if ($daysSince -lt $activeThresholdDays) { $activityStatus = "Active" }
+                elseif ($daysSince -lt $staleThresholdDays) { $activityStatus = "Stale" }
+                else { $activityStatus = "Inactive" }
             }
 
-            # Fetch PR Count
-            $prRes = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects/$($proj.key)/repos/$($repo.slug)/pull-requests?state=ALL&limit=1"
-            $prCount = if ($prRes) { $prRes.size } else { 0 }
-
+            # Build the cleaned-up output object
             $row = [PSCustomObject]@{
-                "project-key"               = $proj.key
-                "project-name"              = $proj.name
-                "repo"                      = $repo.name
-                "url"                       = ($repo.links.clone | Where-Object { $_.name -eq 'http' -or $_.name -eq 'https' } | Select-Object -First 1).href
-                "last-commit-date"          = $lastDate
-                "repo-size-in-bytes"        = if ($repo.size) { $repo.size } else { "0" }
-                "attachments-size-in-bytes" = "0"
-                "is-archived"               = if ($repo.status -eq 'ARCHIVED') { "True" } else { "False" }
-                "pr-count"                  = $prCount
+                "project-key"        = $proj.key
+                "project-name"       = $proj.name
+                "repo"               = $repo.name
+                "url"                = ($repo.links.clone | Where-Object { $_.name -match 'http' } | Select-Object -First 1).href
+                "last-commit-date"   = $lastDate
+                "repo-size-in-bytes" = if ($repo.size) { $repo.size } else { "0" }
+                "activity-status"    = $activityStatus
             }
 
             if (-not $script:csvInitialized) {
@@ -124,7 +139,6 @@ foreach ($proj in $allProjects) {
         }
     }
     
-    # Console Output: Total repos: X
     Write-Host "  Total repos: $($projectRepos.Count)" -ForegroundColor Gray
     $currentProjIdx++
 }
@@ -133,5 +147,4 @@ foreach ($proj in $allProjects) {
 Write-Host "`n===== INVENTORY COMPLETE =====" -ForegroundColor Green
 Write-Host "Total Projects  : $($allProjects.Count)"
 Write-Host "Total Repos     : $totalRepos"
-Write-Host "Skipped Projects: $totalSkipped"
 Write-Host "Repo Inventory  : $OutputCsv"
