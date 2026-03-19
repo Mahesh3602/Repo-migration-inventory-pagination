@@ -1,0 +1,17 @@
+# Ignore macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Ignore common image formats
+#*.jpg
+#*.jpeg
+#*.png
+*.gif
+*.svg
+*.webp
+*.tiff
+
+# Optional: Ignore specific folders where images are stored
+# images/
+# assets/screenshots/
