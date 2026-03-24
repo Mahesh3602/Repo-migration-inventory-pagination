@@ -8,6 +8,7 @@
 #  - Automatic cleanup of previous run artifacts
 #  - Detailed error logging for skipped or failed projects
 #  - Metadata extraction including Archive status and Clone URLs
+#  - Http access token(Project admin & Repo admin permissions) is used for authentication.
 # ============================================================
 
 param (
@@ -47,10 +48,15 @@ function Invoke-BitbucketApi {
         }
         catch {
             $attempt++
-            $statusCode = $_.Exception.Response.StatusCode.value__
-            # Handle rate limiting or server unavailability
-            if ($statusCode -in 429, 503, 504) { Start-Sleep -Seconds ($attempt * 2) }
-            else { return $null }
+            if ($_.Exception.Response) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+                if ($statusCode -in 429, 503, 504) { 
+                    Start-Sleep -Seconds ($attempt * 2) 
+                    continue
+                }
+                if ($statusCode -eq 404) { return $null }
+            }
+            return $null
         }
     }
     return $null
@@ -61,7 +67,7 @@ Write-Host "`nFetching projects..." -ForegroundColor Cyan
 $allProjects = New-Object System.Collections.Generic.List[object]
 $isLastProjPage = $false; $projStart = 0
 while (-not $isLastProjPage) {
-    # limit=2 used for testing; change to 100 for production performance
+    # Current limit set to 2 for testing; change to 100 for production
     $response = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects?start=$projStart&limit=2"
     if ($null -eq $response) { $totalSkipped++; break }
     foreach ($p in $response.values) { $allProjects.Add($p) }
@@ -72,18 +78,18 @@ while (-not $isLastProjPage) {
 $totalProjCount = $allProjects.Count
 Write-Host "Total projects found: $totalProjCount`n" -ForegroundColor Green
 
-# ── Step 2: Fetch Repos ───────────────────────────────────────────────────────
+# ── Step 2: Fetch Repos & Hunt for Sizes ──────────────────────────────────────
 $currentProjIdx = 1
 foreach ($proj in $allProjects) {
     $projKey = $proj.key
     $repoCountForThisProject = 0
     $pageIdx = 1
     
-    Write-Host "[$currentProjIdx/$totalProjCount] $($proj.name)" -ForegroundColor Cyan
+    Write-Host "[$currentProjIdx/$totalProjCount] Project: $projKey ($($proj.name))" -ForegroundColor Cyan
     
     $isLastRepoPage = $false; $repoStart = 0
     while (-not $isLastRepoPage) {
-        # limit=2 used for testing; change to 100 for production performance
+        # Current limit set to 2 for testing; change to 100 for production
         $repoResponse = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects/$projKey/repos?start=$repoStart&limit=2"
         
         if ($null -eq $repoResponse) { 
@@ -96,19 +102,30 @@ foreach ($proj in $allProjects) {
         $repoCountForThisProject += $reposOnPage
         $totalRepos += $reposOnPage
         
-        Write-Host "  Page $pageIdx — $reposOnPage repos (running total: $repoCountForThisProject)" -ForegroundColor Gray
-        
         foreach ($repo in $repoResponse.values) {
-            $sizeMB = if ($repo.size) { [math]::Round($repo.size / 1MB, 2) } else { "0" }
+            # 1. Accurate Size Detection (Using Postman-confirmed UI path)
+            $sizeMB = "0.00"
+            $sizeUrl = "$BaseUrl/projects/$projKey/repos/$($repo.slug)/sizes"
+            $sizeRes = Invoke-BitbucketApi -Url $sizeUrl
             
-            # ── Adjusted Output Format (Standard CSV Columns) ──────────────────
+            if ($null -ne $sizeRes -and $sizeRes.repository) {
+                $sizeMB = [math]::Round($sizeRes.repository / 1MB, 2)
+            }
+
+            # 2. Get Default Branch Metadata
+            $branchRes = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects/$projKey/repos/$($repo.slug)/branches/default"
+            $defaultBranch = if ($branchRes) { $branchRes.displayId } else { "N/A" }
+            
+            # ── Construct Row ──────────────────
             $row = [PSCustomObject]@{
-                "project-key"    = $proj.key
-                "project-name"   = $proj.name
-                "repo"           = $repo.name
-                "url"            = ($repo.links.clone | Where-Object { $_.name -eq 'https' -or $_.name -eq 'http' } | Select-Object -First 1).href
+                "Project"        = $proj.name
+                "ProjectKey"     = $proj.key
+                "Repository"     = $repo.name
+                "Slug"           = $repo.slug
+                "RepoUrl"        = ($repo.links.clone | Where-Object { $_.name -eq 'http' -or $_.name -eq 'https' } | Select-Object -First 1).href
+                "DefaultBranch"  = $defaultBranch
                 "MetadataSizeMB" = "$sizeMB"
-                "IsDisabled"     = if ($repo.status -eq 'ARCHIVED') { "True" } else { "False" }
+                "IsDisabled"     = if ($repo.archived -or $repo.status -eq 'ARCHIVED') { "True" } else { "False" }
             }
 
             if (-not $script:csvInitialized) {
@@ -138,8 +155,8 @@ Write-Host "`n===== INVENTORY COMPLETE =====" -ForegroundColor Green
 Write-Host "Total Projects  : $($allProjects.Count)"
 Write-Host "Total Repos     : $totalRepos"
 Write-Host "Skipped Projects: $totalSkipped"
-Write-Host "Repo Inventory  : $OutputCsv"
+Write-Host "Master Inventory: $OutputCsv"
 Write-Host "Project Counts  : $ProjectCountCsv"
 if ($totalSkipped -gt 0) {
-    Write-Host "Error Log       : $ErrorLog  (review skipped items)" -ForegroundColor Yellow
+    Write-Host "Error Log       : $ErrorLog (review skipped items)" -ForegroundColor Yellow
 }
