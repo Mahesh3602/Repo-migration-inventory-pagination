@@ -12,7 +12,7 @@ param (
     [string]$BaseUrl           = "",
     [string]$Pat               = "",
     [int]$BatchStart           = 0,        # Starting project index
-    [int]$BatchSize            = 1750,     # Number of projects to process
+    [int]$BatchSize            = 500,     # Number of projects to process
     [int]$DelayMs              = 150,      # Adjusted for high-volume API calls
     [int]$MaxRetries           = 6,
     [int]$activeThresholdDays  = 180,      # < 6 months
