@@ -112,18 +112,13 @@ foreach ($proj in $allProjects) {
                 $sizeMB = [math]::Round($sizeRes.repository / 1MB, 2)
             }
 
-            # 2. Get Default Branch Metadata
-            $branchRes = Invoke-BitbucketApi -Url "$BaseUrl/rest/api/1.0/projects/$projKey/repos/$($repo.slug)/branches/default"
-            $defaultBranch = if ($branchRes) { $branchRes.displayId } else { "N/A" }
             
             # ── Construct Row ──────────────────
             $row = [PSCustomObject]@{
                 "Project"        = $proj.name
                 "ProjectKey"     = $proj.key
                 "Repository"     = $repo.name
-                "Slug"           = $repo.slug
                 "RepoUrl"        = ($repo.links.clone | Where-Object { $_.name -eq 'http' -or $_.name -eq 'https' } | Select-Object -First 1).href
-                "DefaultBranch"  = $defaultBranch
                 "MetadataSizeMB" = "$sizeMB"
                 "IsDisabled"     = if ($repo.archived -or $repo.status -eq 'ARCHIVED') { "True" } else { "False" }
             }
